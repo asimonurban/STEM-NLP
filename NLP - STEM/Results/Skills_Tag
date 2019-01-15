@@ -1,0 +1,737 @@
+
+# coding: utf-8
+
+# In[1]:
+
+
+import gensim
+import pandas as pd
+import os
+import collections
+import smart_open
+from nltk.tokenize import RegexpTokenizer
+import gensim.models.doc2vec
+import multiprocessing
+import numpy as np
+from scipy.sparse import csr_matrix
+import nltk.tokenize 
+from gensim.models.doc2vec import TaggedDocument
+import pickle
+import seaborn as sns
+from string import digits
+from collections import namedtuple
+import math
+import matplotlib 
+from datetime import timedelta
+from pattern.de import singularize, conjugate, predicative
+import matplotlib.pyplot as plt
+import re
+from langdetect import detect
+import pickle
+from langdetect import DetectorFactory 
+DetectorFactory.seed = 32792
+import sys
+import re
+import csv
+from sklearn.metrics.pairwise import euclidean_distances
+from scipy.spatial import distance
+from itertools import chain
+from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import LinearSVC
+from scipy.spatial.distance import pdist, squareform
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from iwnlp.iwnlp_wrapper import IWNLPWrapper
+import sys
+import numpy as np
+from nltk.tokenize import RegexpTokenizer
+from gensim import corpora, models
+import gensim
+import csv
+from sklearn.externals import joblib
+from string import digits
+import bz2
+import pyLDAvis
+import pyLDAvis.gensim
+from collections import Counter
+from googletrans import Translator
+import texttable as tt
+
+
+# In[2]:
+
+
+# Right here we're going to import a list of stopwords for the German langugage that will come later in the pre-processing step.
+German = ['der', 'dann', 'auch', 'wenn', 'aus', 'dem',  'meinen',  'adsorbens', 
+'den', 'die', 'das', u'f\xe3\xbcr', u'w\xe3\xbcnsche', 'und', 'sein', 'in', 'zu', 'ein', 'zu', 'ich', 'sie', 
+'von', 'wir', u'gr\xe3\xbc\xe3', 'nicht', 'mit', 'es', 'auf', 'an', 'dass', 'oder', 'sagen', 'dies', 'werden', 'es',
+ 'Sie', 'e', 'Ein', 'zu', 'Wir', 'k\xc3\xa3  ', u'gr\xc3\xa3\xc2\xbc\xc3\xa3', 'bei', 'sind', 'eine', 'einen', 'ihr', 
+ 'vielen', 'uns', 'aber',  'da', 'ist', 'mir', 'mich', 'mein', 'fur', u'f\xc3\xbcr', u'w\xe3\xbcrden', u'w\xe3\xbcrde', u'k\xe3', 
+ u'm\xe3', u'\xe3', u'\xe2', u'gr\xe3\xbcssse', u'gru\xe3']
+
+
+# In[ ]:
+
+
+### Here I have a file that contains multiple stems and their lemmas
+stop_words = pd.read_csv('stop_words.csv')
+
+
+# In[ ]:
+
+
+#### I'm combining the first set of words with the stems and lemmas from the excel doc.
+German = German + stop_words['Articles'].tolist() + stop_words['Possessive'].tolist() + /
+stop_words['Pronouns'].tolist() + stop_words['Prepositions'].tolist() + stop_words['Conjuction'].tolist() + / 
+stop_words['Verbs'].tolist() + stop_words['Letters'].tolist() + stop_words['Adverb'].tolist() + / 
+stop_words['Noun'].tolist() + stop_words['other'].tolist()
+
+
+# In[ ]:
+
+
+#### Here I'm making sure each word only appears once (since I merge two different sources, and then I lower each word to make it match with the data)
+German = list(set(German))
+german_temp = []
+for x in German:
+    try:
+        y = x.lower()
+        german_temp.append(y)
+    except AttributeError:
+        print(x)
+German = german_temp
+# Here I am importing a lemmatizer that will lemmatize each word of the messages
+lemmatizer = IWNLPWrapper(lemmatizer_path='IWNLP.Lemmatizer_20170501.json')
+
+
+# In[ ]:
+
+
+# Here we are loading in the data and labeling the column names.
+df = pd.read_stata('/Users/mbackus/Desktop/de_messages.dta')
+df = df[['offr_msg', 'cre_date', 'offr_type_id', 'byr_id']]
+df.columns = ["message", "date", "buyer", "id"]
+
+
+# In[ ]:
+
+
+# Here we are changing the date to datetime format so that we can make some changes
+# After conversion, we subtract our days by 2 so that the treatment date can be the start of a week 
+# Once its the start of the week we generate a week variable (This one is ordered 21 - 30, so we subtract by 10. 
+# we subtract by 10 for ease of loop running
+df = df.loc[(df.index < 248722 )]
+df['date'] = pd.to_datetime(df.date)
+df['date'] = df['date'] - timedelta(days=2)
+df['week'] = df.date.dt.week 
+df['week'] = df['week'] - 20
+
+
+# In[ ]:
+
+
+### decoding the messages (just some unicode issues)
+for i, row in df.iterrows():
+    df.set_value(i,'message', unicode( df['message'][i], "utf-8"))
+
+
+mess_series = df.message
+lang = []
+for id, element in  enumerate(mess_series): 
+        try: 
+            lang = np.append(lang,detect(element))
+        except:
+            lang = np.append(lang,"nomess")
+lang = pd.DataFrame(lang)
+main_df = df.join(lang)
+
+
+# In[ ]:
+
+
+# After this, we rename our main_df's columns and save the model.
+main_df.columns = ["message","date", "buyer", "buyer_id", "week", "language"]
+
+
+# In[ ]:
+
+
+### saving our data after the language detection
+main_df.to_pickle('main_df.pkl')
+
+
+# In[ ]:
+
+
+#### reading the dataset and dropping weeks before the introduction of messages and resorting the index. 
+main_df = pd.read_pickle("main_df.pkl")
+main_df = main_df.loc[main_df['week'] > 0]
+main_df.sort_index()
+main_df = main_df.reset_index(drop = True)
+
+
+# In[3]:
+
+
+# Here we are creating a table for the languages in our subset.
+langlist = pd.Categorical(main_df.language)
+langlist
+
+lang_tab = pd.crosstab(index=langlist,columns="count")
+lang_tab
+
+
+# In[ ]:
+
+
+# Right here we plot the frequency of our langauges throughout the weeks to insure the language detection did not fail
+temp = pd.get_dummies(main_df['language'])
+dates = pd.DataFrame(main_df['week'])
+cleaned = dates.join(temp)
+frequencies = cleaned.groupby('week').mean()
+frequencies['noende'] = 1 - frequencies['en'] - frequencies['de']
+frequencies2 = frequencies[['en', 'de', 'noende']]
+
+
+# In[ ]:
+
+
+plt.plot(frequencies2)
+plt.legend(['en', 'de', 'noende'], ['English', 'German', 'Other'])
+plt.xlabel('Date of Message')
+plt.show('Languages')
+plt.close()
+
+
+# In[ ]:
+
+
+plt.legend(['en', 'de'], ['English', 'German'])
+plt.title('Frequency by Language')
+plt.xlabel('Date of Message')
+plt.show()
+
+
+# In[3]:
+
+
+### re-saving post language 
+main_df = pd.read_pickle("main_df.pkl")
+
+
+# In[4]:
+
+
+# Now we limit our sample to only german detected messages
+df = main_df.loc[main_df['language'] == 'de']
+df.sort_index()
+
+
+# In[5]:
+
+
+# Here we're going to seperate buyer and seller message (and by frequency count)
+df_buyer = df.loc[df['buyer'] < 2]
+df_buyer.sort_index()
+df_buyer = df_buyer.reset_index(drop = True)
+df_buyer.to_pickle('df_buyer.pkl')
+# seller messages
+df_seller = df.loc[df['buyer'] == 2]
+df_seller.sort_index()
+df_seller = df_seller.reset_index(drop = True)
+df_seller.to_pickle('df_seller.pkl')
+
+
+# In[6]:
+
+
+### now we're going to get a good idea of the frequency counts
+freq_buyer_df = df_buyer['buyer_id']
+df_buyer['buyer_id_string'] = pd.Series([str(k) for k in freq_buyer_df])
+freq_seller_df = df_seller['buyer_id']
+df_seller['buyer_id_string'] = pd.Series([str(k) for k in freq_seller_df])
+df_buyer['freq'] = df_buyer.groupby('buyer_id_string')['buyer_id_string'].transform('count')
+df_seller['freq'] = df_seller.groupby('buyer_id_string')['buyer_id_string'].transform('count')
+df_buyer['freq'].hist(density=1, bins=36)
+plt.show()
+df_seller['freq'].hist(density=1, bins=77)
+plt.show()
+
+
+# In[7]:
+
+
+### now we're goign to generate two groups: repeat buyers and one-time buyers
+buyer = df_buyer
+seller = df_seller
+buyer_short = df_buyer.loc[df_buyer['freq'] == 1]
+buyer_long = df_buyer.loc[df_buyer['freq'] > 1]
+seller_short = df_seller.loc[df_seller['freq'] == 1]
+seller_long = df_seller.loc[df_seller['freq'] > 1]
+
+
+# In[9]:
+
+
+print len(buyer_short)
+print len(buyer_long)
+print len(set(buyer_short['buyer_id_string']))
+print len(set(buyer_long['buyer_id_string']))
+print len(seller_short)
+print len(seller_long)
+print len(set(seller_short['buyer_id_string']))
+print len(set(seller_long['buyer_id_string']))
+
+
+# Pre-Processing Main Steps:
+#  
+# 1. First we have code that elimiates special characters (with the exception of spaces), numbers and lowers all the letters
+# 2. Then we need to get our data into four formats: 
+#     1. To train our gensim we need a list of sentences (order does not matter for the items in the list)
+#          = [ ["This", "is", "an", "example"], ["This", "is", "another", "example"]
+#      2. To test the model aganist our sample we need a list for each week:
+#          = list['week1'] = ["This is our example 1", "Then we need another example 1"]
+#          = list['week2'] = ["This is our example 2", "This is our example 2"]
+#      3. To run our cosine similarity we need one list that combines the list for every week
+#          = ["This is every message in week1 this is every message in week1", "This is every message in week2"]
+#      4. To our sentiment we need a list of words for each week
+#          = list['week1'] = [ "this", "is", "our", "example"]
+#      5. To train our LDA we need to have a list of sentances of our data
+#          = list = ["This is the first sentance of week1", "This is first sentance of week2"]
+
+# In[23]:
+
+
+def text_clean(df, label):
+    tokenizer = RegexpTokenizer(r'\w+')
+    obj = {}
+    obj_list = []
+    gensim_train = []
+    newlines = {}
+    texts = {}
+    for i in range(1,11):
+        obj['week' + str(i)] = df['message'][df['week'].isin([i])].tolist()
+        for num in obj['week' + str(i)]:
+            if type(num) != float:
+                num = num.replace("_","")
+        # Here I am deleting any numbers that appear
+        newlines['week' + str(i)] = []
+        for line in obj['week' + str(i)]:
+            newlines['week' + str(i)].append(line.translate({ord(k): None for k in digits}))
+        texts['week' + str(i)] = []
+        for x in newlines['week' + str(i)]:
+            tokens = []
+            x = u"".join(x)
+            raw = x.lower()
+            tokens_temp = tokenizer.tokenize(raw)
+            for a in tokens_temp:
+                if a != 'der' or 'den':
+                    try:
+                        temp = lemmtizer.lemmatize_plain(a, ignore_case=True)[0]
+                        temp = temp.lower()
+                        tokens.append(temp)
+                    except:
+                        tokens.append(a)
+                tokens = [z for z in tokens if not z in German]
+                texts['week' + str(i)].append(tokens)
+                gensim_train.append(tokens)
+    texts_name = "texts_" + str(label) + ".pkl"
+    gensim_name = "gensim_train" + str(label) + ".pkl"
+    with open(texts_name, 'wb') as f:
+        pickle.dump(texts, f)
+    with open(gensim_name, 'wb') as f:
+        pickle.dump(gensim_train, f)
+    gensim_test = {}
+    for i in range(1,11):
+        gensim_test['week' + str(i)] = []
+        for x in texts['week' + str(i)]:
+            x = "".join(x)
+            gensim_test['week' + str(i)].append(x)
+    name = "gensim_test" + str(label) + ".pkl"
+    with open(name, 'wb') as f:
+        pickle.dump(gensim_test, f)
+
+
+# In[11]:
+
+
+def intertools(texts, label):
+    cosine = {}
+    sa = {}
+    for i in range(1,11):
+        sa['week' + str(i)] = list(itertools.chain.from_iterable(texts['week' + str(i)]))
+        cosine['week' + str(i)] = u" ".join(sa['week' + str(i)])
+        return sa, cosine
+    name = "sa" + str(label) + ".pkl"
+    with open(name, 'wb') as f:
+        pickle.dump(sa, f)
+    name = "cosine" + str(label) + ".pkl"
+    with open(name, 'wb') as f:
+        pickle.dump(cosine, f)
+
+
+# In[12]:
+
+
+def doc2vec(gensim_train, gensim_test, df):
+    train_file_buyer = gensim_train
+    docs = []
+    analyzedDocument = namedtuple('AnalyzedDocument', 'words tags')
+    gensim_train_buyer = []
+    for i in range(1,11):
+        gensim_train = gensim_test['week' + str(i)] + gensim_train
+    for i, text in enumerate(gensim_train):
+        words = text.lower().split()
+        tags = [i]
+        docs.append(analyzedDocument(words, tags))
+    cores = multiprocessing.cpu_count()
+    model = gensim.models.doc2vec.Doc2Vec(size=100, min_count=2, iter=200)
+    model.build_vocab(docs)
+    model_buyer = model.train(docs, total_examples=model.corpus_count, epochs=model.iter)
+    names = []
+    for i in range(1,101):
+        names.append('v_' + str(i))
+    average_model = {}
+    modelrun = {}
+    df_doc = {}
+    for x in range(1,11):
+        model1 = np.zeros((1,100))
+        df_doc['week' + str(x)] = pd.DataFrame(model1, columns = names)
+        df_doc['week' + str(x)]['message'] = " "
+        for y in texts_buyer['week' + str(x)]:
+            d = len(gensim_test['week' + str(x)])
+            model2 = model.infer_vector(y)
+            model2 = np.reshape(model2, (1,100))
+            df2 = pd.DataFrame(model2, columns = names)
+            df2['message'] = " ".join(y)
+            df_doc['week' + str(x)] = pd.concat([df_doc['week' + str(x)], df2])
+            model1 = np.add(model1, model2)
+            average_model['week' + str(x)] = np.divide(model1,d)
+    column = {}
+    for i in range(1,11):
+        column['column_' + str(i)] = []
+        for num in range(1,11):
+            dst = [distance.euclidean(average_model['week' + str(i)],average_model['week' + str(num)])]
+            column['column_' + str(i)] = column['column_' + str(i)] + dst  
+    Matrix = {}
+    for i in range(1,11):
+        Matrix['Matrix' + str(i)] = np.array(column['column_' + str(i)])
+    EU = np.matrix((Matrix['Matrix1'], Matrix['Matrix2'],Matrix['Matrix3'], Matrix['Matrix4'], 
+                    Matrix['Matrix5'], Matrix['Matrix6'], Matrix['Matrix7'],
+                    Matrix['Matrix8'], Matrix['Matrix9'], Matrix['Matrix10']))
+    name = "EU" + str(df) + ".pkl"
+    with open(name, 'wb') as f:
+        pickle.dump(sa, f)
+    name = "df_doc" + str(df) + ".pkl"
+    with open(name, 'wb') as f:
+        pickle.dump(df_doc, f)
+    del model
+
+
+# In[13]:
+
+
+def cosinesim(cosine, df):
+    corpus = []
+    for i in range(1,11):
+        corpus = [corpus, cosine['week' + str(i)]]
+    vectorizer = CountVectorizer()
+    X = vectorizer.fit_transform(corpus)
+    corpus_cosine= squareform(pdist(X.toarray(), 'cosine'))
+    name = "corpus_cosine" + str(df) + ".pkl"
+    with open(name, 'wb') as f:
+        pickle.dump(df_doc, f) 
+
+
+# In[14]:
+
+
+def sentiws(texts, df):
+    xls = pd.ExcelFile("Simon_SENTIWS.xlsx")
+    sentiws1 = pd.read_excel(xls, 'Sheet1')
+    sentiws2 = pd.read_excel(xls, 'Sheet3')
+    frames = [sentiws1, sentiws2]
+    sentiws = pd.concat(frames)
+    Polar = {}
+    for i in range(1,38):
+        Polar['inflection' + str(i)] = {}
+        Polar['inflection' + str(i)] = sentiws.set_index('Inflection' + str(i))['Polairty'].to_dict()
+    def merge_two_dicts(x, y):
+        z = x.copy() # start with x's keys and values
+        z.update(y) # modifies z with y's keys and values & returns None
+        return z
+    z = merge_two_dicts(Polar['inflection1'], Polar['inflection2'])
+    for i in range(3,37):
+        z.update(Polar['inflection' + str(i)])
+    z_list = z.keys()
+    Polar = {}
+    for i in range(1,11):
+        Polar['week' + str(i)] = []
+        for x in texts['week' + str(i)]:
+            messagep = 0
+            for word in x:
+                try:
+                    messagep = messagep + (z[word])
+                except:
+                    messagep = messagep
+            Polar['week' + str(i)].append(messagep)
+    Polar_arr = {}
+    for i in range(1,11):
+        Polar_arr['week' + str(i)] = np.empty
+        Polar_arr['week' + str(i)] = np.asarray(Polar_seller['week' + str(i)])
+    Sentiment_Avg = []
+    Sentiment_SD = []
+    for i in range(1,11):
+        Sentiment_Avg.append(np.mean(Polar_arr['week' + str(i)]))
+        Sentiment_SD.append(np.std(Polar_arr['week' + str(i)])/ math.sqrt(len(texts['week' + str(i)])))
+    x = [1,2,3,4,5,6,7,8,9,10]
+    y = Sentiment_Avg
+    e = Sentiment_SD
+    plt.errorbar(x, y, yerr = e)
+    plt.show()
+    total_buyer = 0
+    total_seller = 0
+    for i in range(1,11):
+        total_buyer = (np.mean(Polar_arr_buyer['week' + str(i)])) + total_buyer
+        total_seller = (np.mean(Polar_arr_seller['week' + str(i)])) + total_seller
+    total_buyer = total_buyer/10
+    total_seller = total_seller/10
+    buyer_mean = np.concatenate([Polar_arr_buyer['week1'], Polar_arr_buyer['week2'], Polar_arr_buyer['week3'],
+                         Polar_arr_buyer['week4'], Polar_arr_buyer['week5'], Polar_arr_buyer['week6'],
+                         Polar_arr_buyer['week7'],Polar_arr_buyer['week8'], Polar_arr_buyer['week9'],
+                         Polar_arr_buyer['week10']])
+    seller_mean = np.concatenate([Polar_arr_seller['week1'],Polar_arr_seller['week2'], Polar_arr_seller['week3'],
+                         Polar_arr_seller['week4'], Polar_arr_seller['week5'],Polar_arr_seller['week6'],
+                         Polar_arr_seller['week7'], Polar_arr_seller['week8'], Polar_arr_seller['week9'],
+                         Polar_arr_seller['week10']])
+
+
+# In[15]:
+
+
+def count_top_words(texts, df):
+    corpus_merged = []
+    for i in range(1,11):
+        corpus_merged = corpus_merged + texts['week' + str(i)]
+    N = 30
+    words = {}    
+    for word in corpus_merged:
+        for x in word:
+            words[x] = words.get(x, 0) + 1
+    top_words = sorted(words.iteritems(), key=itemgetter(1), reverse=True)[:N]
+    words = []
+    frequencies = []
+    for word, frequency in top_words:
+        words.append(word)
+        frequencies.append(float(frequency)/len(gensim_train))
+    tab = tt.Texttable()
+    headings = ['Word', 'Frequencies']
+    tab.header(headings)
+    for row in zip(words, frequencies):
+        tab.add_row(row)
+    s = tab.draw()
+def count_differences(sa, df):
+    counts = {}
+    for i in range(1,11):
+        counts['week' + str(i)] = Counter(sa['week' + str(i)])
+    df_tf = pd.DataFrame([counts['week1'], counts['week2'], counts['week3'], counts['week4'],
+                                counts['week5'], counts['week6'], counts['week7'], counts['week8'],
+                                counts['week8'], counts['week10']], ).T
+    df_tf.fillna(0)
+    df_tf.columns = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10']
+    top_10_negative = {}
+    top_10_positive = {}
+    df_tf = df_tf.fillna(0)
+    for i in range(1,11):
+        df_tf[str(i)] = df_tf[str(i)]/len(gensim_test['week' + str(i)])
+    for i in range(1,11):
+        for j in range(1,11):
+            df_tf[str(i) +  '-' + str(j) ] = df_tf[str(i)] - df_tf[str(j)]
+            df_tf = df_tf.sort_values(str(i) +  '-' + str(j))
+            top_10_negative[str(i) +  '-' + str(j)] = df_tf[str(i) +  '-' + str(j)][0:10]
+            top_10_positive[str(i) +  '-' + str(j)] = df_tf[str(i) +  '-' + str(j)][-11:-1]
+    rank= [1,2,3,4,5,6,7,8,9,10]
+    top_10_negative_list = {}
+    top_10_positive_list = {}
+    for i in range(1,11):
+        for j in range(1,11):
+            if i < j:
+                top_10_negative_list[str(i) + '-' + str(j)] = top_10_negative[str(i) + '-' + str(j)].index.values.tolist()
+                top_10_positive_list[str(i) + '-' + str(j)] = top_10_positive[str(i) + '-' + str(j)].index.values.tolist()
+    translator = Translator()
+    top_10_english_n = {}
+    top_10_english_p = {}
+    for i in range(1,11):
+        for j in range(1,11):
+            if i < j:    
+                top_10_english_n[str(i) + '-'+ str(j)] = []
+                top_10_english_p[str(i) + '-'+ str(j)] = []
+    for i in range(1,11):
+        for j in range(1,11):
+            if i < j:  
+                for x in top_10_negative_list[str(i) + '-' + str(j)]:
+                    try:
+                        top_10_english_n[str(i) + '-'+ str(j)].append(translator.translate(x, dest = 'en').text)
+                    except ValueError:
+                        print x
+                for x in top_10_positive_list[str(i) + '-' + str(j)]:
+                    try:
+                        top_10_english_p[str(i) + '-'+ str(j)].append(translator.translate(x, dest = 'en').text)
+                    except ValueError:
+                        print x
+    rows = {}
+    for i in range(1,11):
+        for j in range(1,11):
+            if i < j:  
+                rows[str(i) + '-'+ str(j)] = {}
+                for x in range(0,10):
+                    rows[str(i) + '-'+ str(j)][str(x)] = []
+                    rows[str(i) + '-'+ str(j)][str(x)].append(str(x + 1))
+                    rows[str(i) + '-'+ str(j)][str(x)].append(top_10_negative_list[str(i) + '-' + str(j)][x])
+                    rows[str(i) + '-'+ str(j)][str(x)].append(top_10_english_n[str(i) + '-'+ str(j)][x])
+                    rows[str(i) + '-'+ str(j)][str(x)].append(top_10_positive_list[str(i) + '-' + str(j)][x])
+                    rows[str(i) + '-'+ str(j)][str(x)].append(top_10_english_p[str(i) + '-'+ str(j)][x])
+    a = r'''
+    \begin{tabular}{l l l l l}%
+    \hline% 
+    '''
+    d = r'''
+
+    \hline%
+    \multicolumn{5}{r}{ }\\%
+    '''
+    b = r'''
+    \end{tabular}%
+    '''
+    c = r'''
+    '''
+    readytoinsert = {}
+    for i in range(1,11):
+        for j in range(1,11):
+            if i < j:  
+                for x in range(0,10):
+                    readytoinsert[str(x)] = "{} & {} & {} & {} & {} ".format(rows[str(i) + '-'+ str(j)][str(x)][0].encode('utf-8').strip(), rows[str(i) + '-'+ str(j)][str(x)][1].encode('utf-8').strip(), rows[str(i) + '-'+ str(j)][str(x)][2].encode('utf-8').strip(), rows[str(i) + '-'+ str(j)][str(x)][3].encode('utf-8').strip(), rows[str(i) + '-'+ str(j)][str(x)][4].encode('utf-8').strip())
+                readytoinsert_final = a + 'rank& f_{'+ str(i) + '} - f_{' + str(j) + '} German & f_{'+ str(i) + '} - f_{' + str(j) + '} English & f_{' + str(j) + '} - f_{' + str(i) + '} German & f_{' + str(j) + '} - f_{' + str(i) + '} English\\\%'             + d + readytoinsert['0'] + '\\\%' + c             + readytoinsert['1'] + '\\\%' + c + readytoinsert['2'] + '\\\%' + c +            readytoinsert['3'] +'\\\%' + c +  readytoinsert['4'] +  '\\\%' + c + readytoinsert['5']  +             '\\\%' + c + readytoinsert['6'] + '\\\%' + c +             readytoinsert['7'] + '\\\%' + c             + readytoinsert['8'] + '\\\%' + c + readytoinsert['9'] + '\\\%' + b
+                f = open(str(i) + '-'+ str(j) + '_seller' + '.tex','w')
+                f.write(readytoinsert_final)
+                f.close()
+
+
+# In[16]:
+
+
+def cluster(df_docs, df):
+    for i in range(1,11):
+        df_doc['week' + str(i)]['week'] = i
+    for i in range(2,11):
+        df_cluster = pd.concat([df_doc['week1'], df_doc['week' + str(i)]])
+    cluster  = KMeans(n_clusters = 3)
+    df_cluster['cluster'] = cluster.fit_predict(df_cluster[df_cluster.columns[0:100]])
+    centroids = cluster.cluster_centers_
+    vlist = []
+    for i in range(1,101):
+        vlist.append('v_' + str(i))
+    df_cluster = df_cluster.reset_index(drop = True)
+    for index, row in df_cluster.iterrows():
+        df_cluster.set_value(index, 'class', distance.euclidean(df_cluster[vlist].values[index], centroids[df_cluster['cluster'][index]]))
+    df_cluster_c1 = df_cluster.loc[df_cluster['cluster'] == 0] 
+    df_cluster_c2 = df_cluster.loc[df_cluster['cluster'] == 1] 
+    df_cluster_c3 = df_cluster.loc[df_cluster['cluster'] == 2] 
+    df_cluster_c1.sort_values('class', ascending=False)
+    df_cluster_c2.sort_values('class', ascending=False)
+    df_cluster_c3.sort_values('class', ascending=False)
+    table1 =  df_cluster_c1['message'].head(20).tolist()
+    table2 = df_cluster_c2['message'].head(20).tolist()
+    table3 = df_cluster_c3['message'].head(20).tolist()
+    translator = Translator()
+    cluster1 = []
+    for x in table1: 
+        cluster1.append(translator.translate(x, dest = 'en').text)
+    cluster2 = []
+    for x in table2: 
+        cluster2.append(translator.translate(x, dest = 'en').text)
+    cluster3 = []
+    for x in table3: 
+        cluster3.append(translator.translate(x, dest = 'en').text)
+    tab = tt.Texttable()
+    headings = ['Cluster1','Cluster2', 'Cluster3']
+    tab.header(headings)
+    for row in zip(cluster1, cluster2, cluster3):
+        tab.add_row(row)
+    s = tab.draw()
+    return s
+    emp = pd.get_dummies(df_all_seller['cluster'])
+    dates = pd.DataFrame(df_all_seller['week'])
+    cleaned = dates.join(temp)
+    frequencies = cleaned.groupby('week').mean()
+    frequencies.plot()
+
+
+
+# In[ ]:
+
+
+text_clean(df_buyer, 'buyer')
+with open('texts_buyer.pkl', 'rb')as f:
+    texts_buyer = pickle.load(f)
+intertools(texts_buyer, 'buyer')
+doc2vec(gensim_train_buyer, gensim_test_buy, 'buyer')
+cosinesim(cosine_buyer, 'buyer')
+sentiws(texts_buyer, 'buyer')
+count_top_words(texts_buyer, 'buyer')
+count_differences(sa_buyer, 'buyer')
+cluster(df_cluster_buyer, 'buyer')
+
+
+# In[ ]:
+
+
+text_clean(df_seller, 'seller')
+with open('texts_seller.pkl', 'rb')as f:
+    texts_seller = pickle.load(f)
+intertools(texts_seller, 'seller')
+doc2vec(gensim_train_seller, gensim_test_seller, 'seller')
+cosinesim(cosine_seller, 'seller')
+sentiws(texts_seller, 'seller')
+count_top_words(texts_seller, 'seller')
+count_differences(sa_seller, 'seller')
+cluster(df_cluster_seller, 'buyerseller
+
+
+# In[ ]:
+
+
+text_clean(buyer_short, 'buyer_short')
+with open('texts_buyer_short.pkl', 'rb')as f:
+    texts_buyer_short = pickle.load(f)
+intertools(texts_buyer_short, 'buyer_short')
+cosinesim(cosine_buyer_short, 'buyer_short')
+
+
+# In[ ]:
+
+
+text_clean(buyer_long, 'buyer_long')
+with open('texts_buyer_long.pkl', 'rb')as f:
+    texts_buyer_long = pickle.load(f)
+intertools(texts_buyer_long, 'buyer_long')
+cosinesim(cosine_buyer_long, 'buyer_long')
+
+
+# In[ ]:
+
+
+text_clean(seller_short, 'seller_short')
+intertools(texts_seller_short, 'seller_short')
+cosinesim(cosine_seller_short, 'seller_short')
+
+
+# In[ ]:
+
+
+text_clean(seller_long, 'seller_long')
+intertools(texts_seller_long, 'seller_long')
+cosinesim(cosine_seller_long, 'seller_long')
+
